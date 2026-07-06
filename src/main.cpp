@@ -19,12 +19,32 @@ HX711 scale;
 //------------------------------------------------------
 
 constexpr char OTA_HOSTNAME[] = "printery-abl-probe";
+constexpr uint32_t WIFI_STATUS_LOG_INTERVAL_MS = 5000;
 
 // Set once ArduinoOTA.begin() has run, so loop() only pays for
 // ArduinoOTA.handle() after WiFi actually connects.
 bool otaEnabled = false;
 
+// Throttles the pre-connection status log in loop(); unused once connected.
+uint32_t lastWifiStatusLogMs = 0;
+
 //------------------------------------------------------
+
+const char *wifiStatusToString(wl_status_t status)
+{
+    switch (status)
+    {
+        case WL_IDLE_STATUS:     return "idle";
+        case WL_NO_SSID_AVAIL:   return "SSID not found";
+        case WL_SCAN_COMPLETED:  return "scan completed";
+        case WL_CONNECTED:       return "connected";
+        case WL_CONNECT_FAILED:  return "connect failed (wrong password or auth rejected)";
+        case WL_CONNECTION_LOST: return "connection lost";
+        case WL_WRONG_PASSWORD:  return "wrong password";
+        case WL_DISCONNECTED:    return "disconnected";
+        default:                 return "unknown";
+    }
+}
 
 // Kicks off the WiFi connection and returns immediately. Connection happens
 // asynchronously in the background (the ESP8266 SDK retries on its own), so
@@ -39,7 +59,8 @@ void beginWiFi()
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    Serial.println("WiFi connection started in background");
+    Serial.print("WiFi connection started in background, SSID: ");
+    Serial.println(WIFI_SSID);
 }
 
 void setupOTA()
@@ -52,8 +73,7 @@ void setupOTA()
 
     ArduinoOTA.begin();
 
-    Serial.print("OTA ready, IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("OTA ready");
 }
 
 //------------------------------------------------------
@@ -91,11 +111,27 @@ void loop()
 {
     // Cheap on every iteration whether or not WiFi ever connects: one
     // status check until connected, then handle() once OTA is live. Never
-    // blocks, so probe reads below are unaffected by WiFi/OTA state.
-    if (!otaEnabled && WiFi.status() == WL_CONNECTED)
+    // blocks, so probe reads below are unaffected by WiFi/OTA state. The
+    // status log stops for good once otaEnabled is set.
+    if (!otaEnabled)
     {
-        setupOTA();
-        otaEnabled = true;
+        wl_status_t wifiStatus = WiFi.status();
+
+        if (wifiStatus == WL_CONNECTED)
+        {
+            Serial.print("WiFi connected, IP: ");
+            Serial.println(WiFi.localIP());
+
+            setupOTA();
+            otaEnabled = true;
+        }
+        else if (millis() - lastWifiStatusLogMs >= WIFI_STATUS_LOG_INTERVAL_MS)
+        {
+            lastWifiStatusLogMs = millis();
+
+            Serial.print("WiFi status: ");
+            Serial.println(wifiStatusToString(wifiStatus));
+        }
     }
 
     if (otaEnabled)
@@ -107,8 +143,9 @@ void loop()
     {
         long raw = scale.read();
 
-        Serial.print("Raw: ");
-        Serial.println(raw);
+        // Serial.print("Raw: ");
+        // Serial.println(raw);
+		Serial.print("*");
     }
     else
     {
