@@ -1,20 +1,57 @@
 #include <Arduino.h>
 #include <HX711.h>
 
-const uint8_t HX711_DOUT_PIN = D2;
-const uint8_t HX711_SCK_PIN = D3;
+//------------------------------------------------------
+// HX711 Pin Definitions
+//------------------------------------------------------
+
+const uint8_t HX711_DOUT = D6;   // GPIO12
+const uint8_t HX711_SCK  = D5;   // GPIO14
 
 HX711 scale;
 
-void setup() {
+//------------------------------------------------------
+
+void setup()
+{
     Serial.begin(115200);
-    scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);
+    delay(1000);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println(" HX711 / K2 Strain Gauge Test");
+    Serial.println("========================================");
+
+    scale.begin(HX711_DOUT, HX711_SCK);
+
+    Serial.print("Waiting for HX711");
+
+    while (!scale.is_ready())
+    {
+        Serial.print(".");
+        delay(250);
+    }
+
+    Serial.println();
+    Serial.println("HX711 Ready");
+    Serial.println();
 }
 
-void loop() {
-    if (scale.is_ready()) {
-        long reading = scale.read();
-        Serial.println(reading);
+//------------------------------------------------------
+
+void loop()
+{
+    if (scale.is_ready())
+    {
+        long raw = scale.read();
+
+        Serial.print("Raw: ");
+        Serial.println(raw);
     }
-    delay(200);
+    else
+    {
+        Serial.println("HX711 NOT READY");
+    }
+
+    delay(100);
 }
