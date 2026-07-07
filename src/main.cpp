@@ -14,6 +14,11 @@
 
 const uint8_t HX711_DOUT = D6;   // GPIO12
 const uint8_t HX711_SCK  = D5;   // GPIO14
+const uint8_t PROBE_OUT  = D0;   // GPIO16 -> SKR Z endstop signal
+
+// Temporary wiring-validation toggle period (until real HX711-threshold
+// triggering is restored): how often PROBE_OUT flips state in loop().
+constexpr uint32_t PROBE_TOGGLE_INTERVAL_MS = 5000;
 
 HX711 scale;
 
@@ -455,6 +460,8 @@ void setup()
     Serial.println("========================================");
 
     scale.begin(HX711_DOUT, HX711_SCK);
+    pinMode(PROBE_OUT, OUTPUT);
+    digitalWrite(PROBE_OUT, HIGH);   // Not triggered
 
     Serial.print("Waiting for HX711");
 
@@ -484,18 +491,24 @@ void loop()
 {
     serviceWifi();
 
-    if (scale.is_ready())
+    static bool probeTriggered = false;
+    static uint32_t lastToggleMs = 0;
+
+    if (millis() - lastToggleMs >= PROBE_TOGGLE_INTERVAL_MS)
     {
-        long raw = scale.read();
+        lastToggleMs = millis();
+
+        probeTriggered = !probeTriggered;
+
+        digitalWrite(PROBE_OUT, probeTriggered ? LOW : HIGH);
 
         char line[LOG_LINE_MAX_LEN];
-        snprintf(line, sizeof(line), "Raw: %ld", raw);
+        snprintf(
+            line,
+            sizeof(line),
+            "Probe %s",
+            probeTriggered ? "TRIGGERED" : "RELEASED"
+        );
         logLine(line);
     }
-    else
-    {
-        logLine("HX711 NOT READY");
-    }
-
-    delay(100);
 }
