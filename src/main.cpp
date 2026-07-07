@@ -18,6 +18,33 @@ const uint8_t HX711_SCK  = D5;   // GPIO14
 HX711 scale;
 
 //------------------------------------------------------
+// Live log (mirrored to the web viewer)
+//------------------------------------------------------
+
+constexpr size_t LOG_LINE_MAX_LEN = 96;
+
+char latestLogLine[LOG_LINE_MAX_LEN] = "";
+uint32_t latestLogSeq = 0;
+
+// Every discrete status/reading line goes through here so it's visible to
+// the web log viewer. No Serial output: once WiFi is up this is the only
+// place these lines go, keeping Serial off the hot path entirely.
+void logLine(const char *line)
+{
+    // Not strncpy: it zero-pads the rest of the buffer on every call, which
+    // is wasted work when this runs every loop iteration.
+    size_t len = strlen(line);
+    if (len > LOG_LINE_MAX_LEN - 1)
+    {
+        len = LOG_LINE_MAX_LEN - 1;
+    }
+    memcpy(latestLogLine, line, len);
+    latestLogLine[len] = '\0';
+
+    latestLogSeq++;
+}
+
+//------------------------------------------------------
 // WiFi / OTA configuration
 //------------------------------------------------------
 
@@ -157,11 +184,11 @@ void resolveWifiCredentials(char *ssidOut, size_t ssidOutLen, char *passwordOut,
 {
     if (loadStoredWifiCredentials(ssidOut, ssidOutLen, passwordOut, passwordOutLen))
     {
-        Serial.println("Using WiFi credentials saved via captive portal");
+        logLine("Using WiFi credentials saved via captive portal");
         return;
     }
 
-    Serial.println("No saved WiFi credentials; using compiled-in defaults");
+    logLine("No saved WiFi credentials; using compiled-in defaults");
     strncpy(ssidOut, WIFI_SSID, ssidOutLen - 1);
     ssidOut[ssidOutLen - 1] = '\0';
     strncpy(passwordOut, WIFI_PASSWORD, passwordOutLen - 1);
@@ -181,21 +208,85 @@ void beginWiFiSTA(const char *ssid, const char *password)
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
 
-    Serial.print("WiFi connection started in background, SSID: ");
-    Serial.println(ssid);
+    char line[LOG_LINE_MAX_LEN];
+    snprintf(line, sizeof(line), "WiFi connection started in background, SSID: %s", ssid);
+    logLine(line);
 }
 
 void setupOTA()
 {
     ArduinoOTA.setHostname(OTA_HOSTNAME);
 
-    ArduinoOTA.onStart([]() { Serial.println("OTA update starting"); });
-    ArduinoOTA.onEnd([]() { Serial.println("OTA update complete"); });
-    ArduinoOTA.onError([](ota_error_t error) { Serial.printf("OTA error [%u]\n", error); });
+    ArduinoOTA.onStart([]() { logLine("OTA update starting"); });
+    ArduinoOTA.onEnd([]() { logLine("OTA update complete"); });
+    ArduinoOTA.onError([](ota_error_t error) {
+        char line[LOG_LINE_MAX_LEN];
+        snprintf(line, sizeof(line), "OTA error [%u]", error);
+        logLine(line);
+    });
 
     ArduinoOTA.begin();
 
-    Serial.println("OTA ready");
+    logLine("OTA ready");
+}
+
+//------------------------------------------------------
+// Log web server (served once connected to a real WiFi network)
+//------------------------------------------------------
+
+constexpr uint16_t LOG_SERVER_HTTP_PORT = 80;
+
+// How often the browser polls for a new log line, and how long it waits
+// before retrying after a failed request (e.g. mid-OTA-update).
+constexpr uint32_t LOG_POLL_INTERVAL_MS = 300;
+constexpr uint32_t LOG_POLL_RETRY_MS = 1000;
+
+ESP8266WebServer logServer(LOG_SERVER_HTTP_PORT);
+
+// Static page: an auto-scrolling frame that polls /log and appends any new
+// line. No history is kept server-side, so this only ever shows current data,
+// not a full transcript.
+void handleLogPageRoot()
+{
+    char html[900];
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>printery-abl-probe log</title>"
+        "<style>"
+        "body{background:#111;color:#0f0;font-family:monospace;margin:0;}"
+        "#log{height:100vh;overflow-y:auto;padding:8px;box-sizing:border-box;white-space:pre-wrap;}"
+        "</style></head><body>"
+        "<div id='log'></div>"
+        "<script>"
+        "var seen=-1;var el=document.getElementById('log');"
+        "function poll(){fetch('/log').then(function(r){return r.json();}).then(function(d){"
+        "if(d.seq!==seen){seen=d.seq;el.textContent+=d.line+String.fromCharCode(10);el.scrollTop=el.scrollHeight;}"
+        "setTimeout(poll,%u);"
+        "}).catch(function(){setTimeout(poll,%u);});}"
+        "poll();"
+        "</script></body></html>",
+        LOG_POLL_INTERVAL_MS, LOG_POLL_RETRY_MS);
+
+    logServer.send(200, "text/html", html);
+}
+
+void handleLogData()
+{
+    char json[LOG_LINE_MAX_LEN + 32];
+    snprintf(json, sizeof(json), "{\"seq\":%lu,\"line\":\"%s\"}",
+             static_cast<unsigned long>(latestLogSeq), latestLogLine);
+
+    logServer.send(200, "application/json", json);
+}
+
+void setupLogServer()
+{
+    logServer.on("/", HTTP_GET, handleLogPageRoot);
+    logServer.on("/log", HTTP_GET, handleLogData);
+    logServer.begin();
+
+    logLine("Log web server ready");
 }
 
 //------------------------------------------------------
@@ -288,10 +379,11 @@ void startCaptivePortal()
     captivePortalServer.onNotFound(handleCaptivePortalRoot);
     captivePortalServer.begin();
 
-    Serial.print("WiFi connect failed; started WAP captive portal, SSID: ");
-    Serial.println(wifiApSsid);
-    Serial.print("Browse to http://");
-    Serial.println(WiFi.softAPIP());
+    char line[LOG_LINE_MAX_LEN];
+    snprintf(line, sizeof(line), "WiFi connect failed; started WAP captive portal, SSID: %s", wifiApSsid);
+    logLine(line);
+    snprintf(line, sizeof(line), "Browse to http://%s", WiFi.softAPIP().toString().c_str());
+    logLine(line);
 }
 
 //------------------------------------------------------
@@ -309,10 +401,12 @@ void serviceWifi()
 
             if (status == WL_CONNECTED)
             {
-                Serial.print("WiFi connected, IP: ");
-                Serial.println(WiFi.localIP());
+                char line[LOG_LINE_MAX_LEN];
+                snprintf(line, sizeof(line), "WiFi connected, IP: %s", WiFi.localIP().toString().c_str());
+                logLine(line);
 
                 setupOTA();
+                setupLogServer();
                 wifiMode = WifiMode::Connected;
             }
             else if (millis() - wifiConnectStartMs >= WIFI_CONNECT_TIMEOUT_MS)
@@ -324,14 +418,16 @@ void serviceWifi()
             {
                 lastWifiStatusLogMs = millis();
 
-                Serial.print("WiFi status: ");
-                Serial.println(wifiStatusToString(status));
+                char line[LOG_LINE_MAX_LEN];
+                snprintf(line, sizeof(line), "WiFi status: %s", wifiStatusToString(status));
+                logLine(line);
             }
             break;
         }
 
         case WifiMode::Connected:
             ArduinoOTA.handle();
+            logServer.handleClient();
             break;
 
         case WifiMode::AccessPoint:
@@ -392,13 +488,13 @@ void loop()
     {
         long raw = scale.read();
 
-        // Serial.print("Raw: ");
-        // Serial.println(raw);
-        Serial.print("*");
+        char line[LOG_LINE_MAX_LEN];
+        snprintf(line, sizeof(line), "Raw: %ld", raw);
+        logLine(line);
     }
     else
     {
-        Serial.println("HX711 NOT READY");
+        logLine("HX711 NOT READY");
     }
 
     delay(100);
